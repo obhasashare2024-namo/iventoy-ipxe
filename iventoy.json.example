@@ -1,0 +1,24 @@
+{
+  "control": [
+    { "VTOY_DEFAULT_MENU_IDX": "0" },
+    { "VTOY_MENU_TIMEOUT": "15" }
+  ],
+  "windows_boot": {
+    "default_mode": "iscsi",
+    "iscsi_portal_port": 3260,
+    "auto_ram_cow": true,
+    "cow_size_mb": 4096
+  },
+  "image_override": [
+    {
+      "image": "win11_clean.vhd",
+      "win_mode": "iscsi",
+      "description": "原廠乾淨 Win11 (iSCSI 原生直啟)"
+    },
+    {
+      "image": "win10_vtoy.vhd.vtoy",
+      "win_mode": "vtoyboot",
+      "description": "舊 Ventoy 專用 Win10 (vtoyboot 驅動模式)"
+    }
+  ]
+}

@@ -1,3 +1,7 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub iventoy_real: String,
@@ -12,12 +16,69 @@ pub struct Config {
     pub vtoy_initrd_url: String,
     pub kernel_path: String,
     pub initrd_path: String,
+    pub json_cfg: IVentoyJson,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BootMode {
     Iscsi,
     Nbd,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+pub struct IVentoyJson {
+    #[serde(default)]
+    pub control: Vec<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    pub windows_boot: WindowsBootConfig,
+    #[serde(default)]
+    pub image_override: Vec<ImageOverride>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WindowsBootConfig {
+    #[serde(default = "default_win_mode")]
+    pub default_mode: String, // "iscsi" or "vtoyboot"
+    #[serde(default = "default_iscsi_port")]
+    pub iscsi_portal_port: u16,
+    #[serde(default = "default_true")]
+    pub auto_ram_cow: bool,
+    #[serde(default = "default_cow_size")]
+    pub cow_size_mb: u32,
+}
+
+fn default_win_mode() -> String {
+    "iscsi".into()
+}
+fn default_iscsi_port() -> u16 {
+    3260
+}
+fn default_true() -> bool {
+    true
+}
+fn default_cow_size() -> u32 {
+    4096
+}
+
+impl Default for WindowsBootConfig {
+    fn default() -> Self {
+        Self {
+            default_mode: default_win_mode(),
+            iscsi_portal_port: default_iscsi_port(),
+            auto_ram_cow: default_true(),
+            cow_size_mb: default_cow_size(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImageOverride {
+    pub image: String,
+    #[serde(default)]
+    pub win_mode: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 impl Default for Config {
@@ -35,20 +96,44 @@ impl Default for Config {
             vtoy_initrd_url: "http://${next-server}:16000/vtoy/initramfs.img".into(),
             kernel_path: "/srv/vtoy/boot/vmlinuz".into(),
             initrd_path: "/srv/vtoy/boot/initramfs.img".into(),
+            json_cfg: IVentoyJson::default(),
         }
     }
 }
 
 fn parse_value(v: &str) -> String {
-    let v = v.trim().trim_matches('"').trim_matches('\'').to_string();
-    v
+    v.trim().trim_matches('"').trim_matches('\'').to_string()
+}
+
+pub fn load_iventoy_json(vtoy_dir: &str) -> IVentoyJson {
+    let candidates = [
+        format!("{}/iventoy.json", vtoy_dir),
+        format!("{}/ventoy.json", vtoy_dir),
+        "iventoy.json".into(),
+        "ventoy.json".into(),
+    ];
+    for p in &candidates {
+        if Path::new(p).exists() {
+            if let Ok(content) = std::fs::read_to_string(p) {
+                if let Ok(cfg) = serde_json::from_str::<IVentoyJson>(&content) {
+                    println!("[config] Loaded json config from: {}", p);
+                    return cfg;
+                }
+            }
+        }
+    }
+    println!("[config] No iventoy.json found, using defaults");
+    IVentoyJson::default()
 }
 
 pub fn load_simple_yaml(path: &str) -> Result<Config, String> {
     let mut cfg = Config::default();
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
-        Err(_) => return Ok(cfg),
+        Err(_) => {
+            cfg.json_cfg = load_iventoy_json(&cfg.vtoy_dir);
+            return Ok(cfg);
+        }
     };
     for line in content.lines() {
         let line = line.trim();
@@ -61,9 +146,7 @@ pub fn load_simple_yaml(path: &str) -> Result<Config, String> {
             match k {
                 "IVENTOY_REAL" => cfg.iventoy_real = v,
                 "BRIDGE_HOST" => cfg.bridge_host = v,
-                "BRIDGE_PORT" => {
-                    cfg.bridge_port = v.parse().unwrap_or(cfg.bridge_port)
-                }
+                "BRIDGE_PORT" => cfg.bridge_port = v.parse().unwrap_or(cfg.bridge_port),
                 "VTOY_DIR" => cfg.vtoy_dir = v,
                 "BOOT_MODE" => {
                     cfg.boot_mode = if v.eq_ignore_ascii_case("nbd") {
@@ -83,6 +166,6 @@ pub fn load_simple_yaml(path: &str) -> Result<Config, String> {
             }
         }
     }
+    cfg.json_cfg = load_iventoy_json(&cfg.vtoy_dir);
     Ok(cfg)
 }
-

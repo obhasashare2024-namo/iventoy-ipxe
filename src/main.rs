@@ -12,7 +12,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn print_usage() {
     println!(
-        "iventoy-vtoy-bridge {}\n\nUsage: iventoy-vtoy-bridge [OPTIONS]\n\n  --config <PATH>  config file (default /etc/iventoy-vtoy-bridge/config.yaml)\n  --host <HOST>    override BRIDGE_HOST\n  --port <PORT>    override BRIDGE_PORT\n  --version        print version\n  --help           this help",
+        "iventoy-ipxe v{} - Pure Rust Standalone All-in-One iVentoy / iPXE Boot Server\n\nUsage: iventoy-ipxe [OPTIONS]\n\n  --config <PATH>  config file (default /etc/iventoy-ipxe/config.yaml or iventoy.json)\n  --host <HOST>    override BRIDGE_HOST\n  --port <PORT>    override BRIDGE_PORT\n  --version        print version\n  --help           this help",
         VERSION
     );
 }
@@ -21,7 +21,7 @@ fn print_usage() {
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut cfg_path = std::env::var("BRIDGE_CONFIG")
-        .unwrap_or_else(|_| "/etc/iventoy-vtoy-bridge/config.yaml".to_string());
+        .unwrap_or_else(|_| "/etc/iventoy-ipxe/config.yaml".to_string());
     let mut host_override: Option<String> = None;
     let mut port_override: Option<u16> = None;
     let mut i = 1;
@@ -46,7 +46,7 @@ async fn main() {
                 }
             }
             "--version" => {
-                println!("iventoy-vtoy-bridge {}", VERSION);
+                println!("iventoy-ipxe v{}", VERSION);
                 return;
             }
             "--help" | "-h" => {
@@ -87,10 +87,9 @@ async fn main() {
         }
     };
     println!(
-        "[*] iventoy-vtoy-bridge v{} running on {} (Real Backend: {}) mode={} pid={}",
+        "[*] iventoy-ipxe v{} (Pure Rust Standalone) running on {} mode={} pid={}",
         VERSION,
         addr,
-        cfg.iventoy_real,
         match cfg.boot_mode {
             BootMode::Iscsi => "iscsi",
             BootMode::Nbd => "nbd",
@@ -102,7 +101,7 @@ async fn main() {
     let shutdown_state = state.clone();
     let shutdown = async move {
         wait_for_signal().await;
-        println!("\n[*] Shutting down Bridge...");
+        println!("\n[*] Shutting down iventoy-ipxe...");
         shutdown_state.storage.shutdown_all().await;
         std::process::exit(0);
     };
