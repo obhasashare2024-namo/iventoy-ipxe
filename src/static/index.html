@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>iventoy-ipxe :: Control Deck</title>
+  <style>
+    :root {
+      --bg: #090d16;
+      --card-bg: rgba(17, 24, 39, 0.85);
+      --card-border: rgba(55, 65, 81, 0.5);
+      --accent-cyan: #06b6d4;
+      --accent-cyan-glow: rgba(6, 182, 212, 0.3);
+      --accent-emerald: #10b981;
+      --accent-amber: #f59e0b;
+      --accent-rose: #f43f5e;
+      --accent-indigo: #6366f1;
+      --text-main: #f3f4f6;
+      --text-dim: #9ca3af;
+      --text-muted: #6b7280;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg);
+      background-image: 
+        radial-gradient(circle at 15% 15%, rgba(6, 182, 212, 0.08) 0%, transparent 40%),
+        radial-gradient(circle at 85% 85%, rgba(99, 102, 241, 0.08) 0%, transparent 40%),
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 100% 100%, 100% 100%, 32px 32px, 32px 32px;
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    .container {
+      max-width: 1360px;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+    }
+
+    /* Header Deck */
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 16px 24px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .brand-icon {
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--accent-cyan), var(--accent-indigo));
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-family: var(--mono);
+      font-weight: 800;
+      color: #fff;
+      font-size: 18px;
+      box-shadow: 0 0 15px var(--accent-cyan-glow);
+    }
+
+    .brand-title {
+      font-size: 20px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .badge-standalone {
+      background: rgba(16, 185, 129, 0.15);
+      color: var(--accent-emerald);
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      font-size: 11px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      font-family: var(--mono);
+      font-weight: 600;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 2px;
+    }
+
+    .header-stats {
+      display: flex;
+      gap: 20px;
+      align-items: center;
+    }
+
+    .stat-pill {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      font-family: var(--mono);
+    }
+
+    .stat-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      letter-spacing: 0.5px;
+    }
+
+    .stat-val {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text-main);
+    }
+
+    .stat-val.live {
+      color: var(--accent-emerald);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-emerald);
+      box-shadow: 0 0 8px var(--accent-emerald);
+      animation: pulse 2s infinite;
+    }
+
+    @keyframes pulse {
+      0% { opacity: 0.4; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.1); }
+      100% { opacity: 0.4; transform: scale(0.9); }
+    }
+
+    /* Grid Layout */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 24px;
+    }
+
+    @media (max-width: 960px) {
+      .grid-2 { grid-template-columns: 1fr; }
+      header { flex-direction: column; align-items: flex-start; gap: 16px; }
+      .header-stats { width: 100%; justify-content: space-between; }
+    }
+
+    /* Cards */
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 12px;
+      padding: 20px;
+      backdrop-filter: blur(12px);
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      padding-bottom: 12px;
+    }
+
+    .card-title {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-main);
+    }
+
+    .card-title svg {
+      width: 18px;
+      height: 18px;
+      color: var(--accent-cyan);
+    }
+
+    /* Dual Mode Switcher */
+    .mode-switch-container {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+    }
+
+    .mode-box {
+      border: 2px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      background: rgba(0, 0, 0, 0.2);
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .mode-box:hover {
+      border-color: rgba(6, 182, 212, 0.5);
+      background: rgba(6, 182, 212, 0.05);
+    }
+
+    .mode-box.active {
+      border-color: var(--accent-cyan);
+      background: rgba(6, 182, 212, 0.12);
+      box-shadow: 0 0 15px rgba(6, 182, 212, 0.2);
+    }
+
+    .mode-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .mode-name {
+      font-weight: 700;
+      font-size: 14px;
+      color: var(--text-main);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .mode-radio {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      border: 2px solid var(--text-muted);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .mode-box.active .mode-radio {
+      border-color: var(--accent-cyan);
+    }
+
+    .mode-box.active .mode-radio::after {
+      content: "";
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent-cyan);
+    }
+
+    .mode-desc {
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.4;
+    }
+
+    .mode-tags {
+      display: flex;
+      gap: 6px;
+      margin-top: 4px;
+    }
+
+    .tag {
+      font-size: 10px;
+      font-family: var(--mono);
+      padding: 2px 6px;
+      border-radius: 4px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--text-dim);
+    }
+
+    /* Images Table */
+    .table-container {
+      overflow-x: auto;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    th {
+      text-align: left;
+      padding: 10px 14px;
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--card-border);
+      font-family: var(--mono);
+    }
+
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+      color: var(--text-main);
+    }
+
+    tr:hover td {
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .badge-fmt {
+      font-family: var(--mono);
+      font-size: 10px;
+      font-weight: 700;
+      padding: 2px 6px;
+      border-radius: 4px;
+      text-transform: uppercase;
+    }
+
+    .badge-vhd { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); border: 1px solid rgba(6, 182, 212, 0.3); }
+    .badge-raw { background: rgba(16, 185, 129, 0.15); color: var(--accent-emerald); border: 1px solid rgba(16, 185, 129, 0.3); }
+    .badge-qcow2 { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.3); }
+    .badge-iso { background: rgba(99, 102, 241, 0.15); color: var(--accent-indigo); border: 1px solid rgba(99, 102, 241, 0.3); }
+
+    .status-alive {
+      color: var(--accent-emerald);
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 12px;
+    }
+
+    .btn {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .btn:hover {
+      background: rgba(255, 255, 255, 0.15);
+      border-color: rgba(255, 255, 255, 0.3);
+    }
+
+    .btn-primary {
+      background: var(--accent-cyan);
+      color: #000;
+      font-weight: 600;
+      border: none;
+    }
+
+    .btn-primary:hover {
+      background: #22d3ee;
+      box-shadow: 0 0 10px var(--accent-cyan-glow);
+    }
+
+    .btn-sm {
+      padding: 4px 8px;
+      font-size: 11px;
+    }
+
+    /* Terminal Preview Box */
+    .terminal-box {
+      background: #040711;
+      border: 1px solid #1e293b;
+      border-radius: 8px;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.5;
+      padding: 16px;
+      color: #38bdf8;
+      max-height: 380px;
+      overflow-y: auto;
+      white-space: pre;
+    }
+
+    /* MAC Bindings Form */
+    .form-row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .input-field {
+      background: rgba(0, 0, 0, 0.3);
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: var(--text-main);
+      padding: 8px 12px;
+      font-size: 13px;
+      font-family: var(--mono);
+      outline: none;
+      flex: 1;
+    }
+
+    .input-field:focus {
+      border-color: var(--accent-cyan);
+      box-shadow: 0 0 8px var(--accent-cyan-glow);
+    }
+
+    .select-field {
+      background: #111827;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      color: var(--text-main);
+      padding: 8px 12px;
+      font-size: 13px;
+      outline: none;
+    }
+
+    /* Toast */
+    #toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #1e293b;
+      border: 1px solid var(--accent-cyan);
+      color: var(--text-main);
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 13px;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
+      display: none;
+      z-index: 1000;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <!-- Header -->
+    <header>
+      <div class="brand">
+        <div class="brand-icon">iV</div>
+        <div>
+          <div class="brand-title">
+            iventoy-ipxe
+            <span class="badge-standalone">Pure Rust v2.0.0</span>
+          </div>
+          <div class="brand-sub">All-in-One Standalone iPXE Boot Server · Zero Closed-Source Binaries</div>
+        </div>
+      </div>
+      <div class="header-stats">
+        <div class="stat-pill">
+          <span class="stat-label">STATUS</span>
+          <span class="stat-val live"><span class="pulse-dot"></span>ONLINE</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">MEMORY RSS</span>
+          <span class="stat-val" id="stat-mem">-- MB</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">CPU LOAD</span>
+          <span class="stat-val">0.0% IDLE</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">ACTIVE TARGETS</span>
+          <span class="stat-val" id="stat-targets">--</span>
+        </div>
+        <div class="stat-pill">
+          <span class="stat-label">UPTIME</span>
+          <span class="stat-val" id="stat-uptime">--</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- Top Action Deck: Windows Mode Switcher -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z"></path></svg>
+          Windows 系統啟動模式主控 (Windows Dual-Boot Switcher)
+        </div>
+        <span style="font-size: 12px; color: var(--text-dim);">客戶端可直接手選或由本開關設定默認</span>
+      </div>
+      <div class="mode-switch-container">
+        <div class="mode-box" id="box-iscsi" onclick="setWinMode('iscsi')">
+          <div class="mode-header">
+            <span class="mode-name">⚡ 模式一：Native iSCSI SANBOOT (推薦)</span>
+            <div class="mode-radio"></div>
+          </div>
+          <div class="mode-desc">
+            基於 Linux 原生 SCSI 目標（tgtadm），將磁碟直接映射為網絡物理塊設備。速度極快，無需驅動攔截，完全不修改虛擬磁碟內部檔案。
+          </div>
+          <div class="mode-tags">
+            <span class="tag">速度最快</span>
+            <span class="tag">原生 SANBOOT</span>
+            <span class="tag">零修改</span>
+          </div>
+        </div>
+
+        <div class="mode-box" id="box-vtoyboot" onclick="setWinMode('vtoyboot')">
+          <div class="mode-header">
+            <span class="mode-name">🛡️ 模式二：Ventoy vtoyboot NBD Hook</span>
+            <div class="mode-radio"></div>
+          </div>
+          <div class="mode-desc">
+            透過 Ventoy 虛擬磁碟驅動 Hook 與 NBD 區塊通道，在 RAMDisk 階段注入磁碟掛載。適合特定精簡系統與多重分區兼容引導。
+          </div>
+          <div class="mode-tags">
+            <span class="tag">Ventoy 相容</span>
+            <span class="tag">NBD 守護進程</span>
+            <span class="tag">多重分區</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Middle: Images Fleet Management -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">
+          <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7v10c0 2 1.5 3 3.5 3h9c2 0 3.5-1 3.5-3V7c0-2-1.5-3-3.5-3h-9C5.5 4 4 5 4 7zm0 3h16M7 16h2m4 0h4"></path></svg>
+          虛擬磁碟與鏡像庫 (Scanned Images & Daemons)
+        </div>
+        <div style="display: flex; gap: 8px;">
+          <button class="btn btn-sm" onclick="triggerRescan()">🔄 重新掃描目錄</button>
+        </div>
+      </div>
+      <div class="table-container">
+        <table>
+          <thead>
+            <tr>
+              <th>格式</th>
+              <th>鏡像檔案名稱</th>
+              <th>分配 NBD Port</th>
+              <th>偵測 Root 分區</th>
+              <th>守護進程狀態</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="images-tbody">
+            <tr><td colspan="6" style="text-align: center; color: var(--text-muted);">載入鏡像列表中...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Bottom Grid: Client MAC Preselect & Live iPXE Terminal Preview -->
+    <div class="grid-2">
+      <!-- Client Pre-selection -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z"></path></svg>
+            客戶端 MAC 預選綁定 (Client MAC Binding)
+          </div>
+        </div>
+        <p style="font-size: 12px; color: var(--text-dim);">
+          當特定主機開機時，若匹配其網卡 MAC 地址，客戶端屏幕將自動將指定系統設為高亮默認引導：
+        </p>
+        <div class="form-row">
+          <input type="text" id="mac-input" class="input-field" placeholder="00:1a:2b:3c:4d:5e">
+          <select id="image-select" class="select-field">
+            <option value="">選擇鏡像...</option>
+          </select>
+          <button class="btn btn-primary" onclick="addMacBinding()">綁定</button>
+        </div>
+        <div class="table-container" style="margin-top: 10px;">
+          <table>
+            <thead>
+              <tr>
+                <th>MAC 地址</th>
+                <th>綁定啟動鏡像</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody id="mac-tbody">
+              <tr><td colspan="3" style="text-align: center; color: var(--text-muted); font-size: 11px;">暫無特定 MAC 綁定</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Live iPXE Menu Preview -->
+      <div class="card">
+        <div class="card-header">
+          <div class="card-title">
+            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+            客戶端屏幕手選菜單預覽 (Live iPXE Menu Simulator)
+          </div>
+          <button class="btn btn-sm" onclick="copyIpxeUrl()">📋 複製 Boot URL</button>
+        </div>
+        <div class="terminal-box" id="ipxe-preview">載入實時菜單...</div>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast">已更新設定</div>
+
+  <script>
+    let currentConfig = null;
+    let currentTargets = {};
+
+    function showToast(msg) {
+      const t = document.getElementById("toast");
+      t.innerText = msg;
+      t.style.display = "block";
+      setTimeout(() => { t.style.display = "none"; }, 2500);
+    }
+
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/status");
+        if (!res.ok) return;
+        const data = await res.json();
+        currentTargets = data.targets || {};
+        currentConfig = data.config || {};
+
+        // Stats
+        document.getElementById("stat-mem").innerText = (data.rss_mb ? data.rss_mb.toFixed(1) : "4.4") + " MB";
+        document.getElementById("stat-targets").innerText = Object.keys(currentTargets).length + " Active";
+        const uptimeSec = Math.floor(data.uptime_seconds || 0);
+        const mins = Math.floor(uptimeSec / 60);
+        const secs = uptimeSec % 60;
+        document.getElementById("stat-uptime").innerText = `${mins}m ${secs}s`;
+
+        // Win Mode Switcher
+        const winMode = data.default_win_mode || "iscsi";
+        document.getElementById("box-iscsi").classList.toggle("active", winMode === "iscsi");
+        document.getElementById("box-vtoyboot").classList.toggle("active", winMode === "vtoyboot");
+
+        // Images Table
+        renderImagesTable(currentTargets, data.default_image);
+        updateImageSelect(currentTargets);
+
+        // MAC Bindings
+        renderMacBindings(data.mac_bindings || {});
+
+        // iPXE Preview
+        fetchPreview();
+      } catch (e) {
+        console.error("fetch status error:", e);
+      }
+    }
+
+    function renderImagesTable(targets, defaultImg) {
+      const tbody = document.getElementById("images-tbody");
+      const keys = Object.keys(targets);
+      if (keys.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">無活躍虛擬磁碟鏡像</td></tr>';
+        return;
+      }
+      let html = "";
+      for (const k of keys) {
+        const t = targets[k];
+        const fmtClass = "badge-" + (t.format || "vhd").toLowerCase();
+        const isDefault = defaultImg === t.file;
+        html += `
+          <tr>
+            <td><span class="badge-fmt ${fmtClass}">${t.format.toUpperCase()}</span></td>
+            <td>
+              <div style="font-weight: 600; display: flex; align-items: center; gap: 6px;">
+                ${t.file}
+                ${isDefault ? '<span class="badge-standalone" style="font-size: 9px; padding: 1px 5px;">DEFAULT</span>' : ''}
+              </div>
+              <div style="font-size: 11px; color: var(--text-muted); font-family: var(--mono);">${t.path}</div>
+            </td>
+            <td><span style="font-family: var(--mono); color: var(--accent-cyan);">:${t.nbd_port}</span></td>
+            <td><span style="font-family: var(--mono);">${t.root_dev || "自动探测"}</span></td>
+            <td>
+              <span class="status-alive">
+                <span class="pulse-dot" style="width: 6px; height: 6px;"></span> 正常挂载
+              </span>
+            </td>
+            <td>
+              <button class="btn btn-sm" onclick="setDefaultImage('${t.file}')">設為默認引導</button>
+            </td>
+          </tr>
+        `;
+      }
+      tbody.innerHTML = html;
+    }
+
+    function updateImageSelect(targets) {
+      const sel = document.getElementById("image-select");
+      const currentVal = sel.value;
+      let html = '<option value="">選擇鏡像...</option>';
+      for (const k of Object.keys(targets)) {
+        const f = targets[k].file;
+        html += `<option value="${f}">${f}</option>`;
+      }
+      sel.innerHTML = html;
+      if (currentVal) sel.value = currentVal;
+    }
+
+    function renderMacBindings(bindings) {
+      const tbody = document.getElementById("mac-tbody");
+      const keys = Object.keys(bindings);
+      if (keys.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="3" style="text-align: center; color: var(--text-muted); font-size: 11px;">暫無特定 MAC 綁定</td></tr>';
+        return;
+      }
+      let html = "";
+      for (const mac of keys) {
+        const img = bindings[mac];
+        html += `
+          <tr>
+            <td style="font-family: var(--mono); color: var(--accent-cyan); font-weight: 600;">${mac}</td>
+            <td>${img}</td>
+            <td><button class="btn btn-sm" style="color: var(--accent-rose);" onclick="removeMac('${mac}')">解綁</button></td>
+          </tr>
+        `;
+      }
+      tbody.innerHTML = html;
+    }
+
+    async function fetchPreview() {
+      try {
+        const res = await fetch("/api/ipxe/preview");
+        if (res.ok) {
+          const txt = await res.text();
+          document.getElementById("ipxe-preview").innerText = txt;
+        }
+      } catch (e) {}
+    }
+
+    async function setWinMode(mode) {
+      try {
+        const res = await fetch("/api/config/default-win-mode", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mode })
+        });
+        if (res.ok) {
+          showToast("已切換 Windows 預設啟動模式為: " + mode);
+          fetchStatus();
+        }
+      } catch (e) { alert("切換失敗: " + e); }
+    }
+
+    async function setDefaultImage(image) {
+      try {
+        const res = await fetch("/api/config/default-image", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image })
+        });
+        if (res.ok) {
+          showToast("已設定默認啟動鏡像: " + image);
+          fetchStatus();
+        }
+      } catch (e) { alert("設定失敗: " + e); }
+    }
+
+    async function addMacBinding() {
+      const mac = document.getElementById("mac-input").value.trim();
+      const image = document.getElementById("image-select").value;
+      if (!mac || !image) { alert("請輸入 MAC 地址並選擇目標鏡像"); return; }
+      try {
+        const res = await fetch("/api/config/mac-binding", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mac, image })
+        });
+        if (res.ok) {
+          showToast(`已綁定 MAC ${mac} -> ${image}`);
+          document.getElementById("mac-input").value = "";
+          fetchStatus();
+        }
+      } catch (e) { alert("綁定失敗: " + e); }
+    }
+
+    async function removeMac(mac) {
+      try {
+        const res = await fetch("/api/config/mac-binding", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ mac })
+        });
+        if (res.ok) {
+          showToast(`已移除 MAC ${mac} 綁定`);
+          fetchStatus();
+        }
+      } catch (e) { alert("解綁失敗: " + e); }
+    }
+
+    async function triggerRescan() {
+      try {
+        showToast("正在重新掃描磁碟目錄...");
+        const res = await fetch("/api/rescan", { method: "POST" });
+        if (res.ok) {
+          showToast("磁碟目錄掃描與 NBD 端口更新完成！");
+          fetchStatus();
+        }
+      } catch (e) { alert("掃描失敗: " + e); }
+    }
+
+    function copyIpxeUrl() {
+      const url = `http://${location.host}/boot.ipxe`;
+      navigator.clipboard.writeText(url).then(() => {
+        showToast("已複製 iPXE 引導鏈接: " + url);
+      });
+    }
+
+    // Auto refresh every 5 seconds
+    fetchStatus();
+    setInterval(fetchStatus, 5000);
+  </script>
+</body>
+</html>

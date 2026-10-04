@@ -6,7 +6,7 @@ description = "100% Standalone Pure Rust All-in-One iVentoy / iPXE Network Boot 
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "time", "sync", "fs", "io-util"] }
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json", "query"] }
 reqwest = { version = "0.12", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

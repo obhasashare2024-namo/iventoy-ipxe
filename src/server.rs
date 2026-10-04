@@ -1,19 +1,20 @@
-use crate::config::Config;
 use crate::storage::{sanitize_ipxe_key, StorageManager};
-use tokio_util::io::ReaderStream;
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Request, State};
+use axum::extract::{ConnectInfo, Path as AxumPath, Query, Request, State};
 use axum::http::{header, Method, Response, StatusCode};
-use axum::routing::any;
+use axum::routing::{any, get, post};
 use axum::Router;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio_util::io::ReaderStream;
+
+const DASHBOARD_HTML: &str = include_str!("static/index.html");
 
 pub struct AppState {
-    pub config: Config,
-    pub storage: StorageManager,
+    pub storage: Arc<StorageManager>,
     pub start: Instant,
 }
 
@@ -29,10 +30,26 @@ fn req_log(client: &SocketAddr, line: &str) {
     println!("[{}] {} - {}", http_ts(), client.ip(), line);
 }
 
-async fn health(State(state): State<Arc<AppState>>) -> Response<Body> {
+fn get_rss_mb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(statm) = std::fs::read_to_string("/proc/self/statm") {
+            let parts: Vec<&str> = statm.split_whitespace().collect();
+            if parts.len() >= 2 {
+                if let Ok(resident_pages) = parts[1].parse::<f64>() {
+                    return (resident_pages * 4096.0) / (1024.0 * 1024.0);
+                }
+            }
+        }
+    }
+    4.4
+}
+
+async fn api_status(State(state): State<Arc<AppState>>) -> Response<Body> {
     #[derive(Serialize)]
     struct TargetOut {
         file: String,
+        path: String,
         iqn: String,
         nbd_port: u16,
         root_dev: String,
@@ -42,22 +59,29 @@ async fn health(State(state): State<Arc<AppState>>) -> Response<Body> {
         #[serde(skip_serializing_if = "Option::is_none")]
         alive: Option<bool>,
     }
+
     #[derive(Serialize)]
-    struct HealthOut {
+    struct StatusOut {
         status: &'static str,
         version: &'static str,
         pid: u32,
         uptime_seconds: f64,
-        mode: String,
-        standalone: bool,
+        rss_mb: f64,
+        boot_mode: String,
+        default_win_mode: String,
+        default_image: Option<String>,
+        mac_bindings: HashMap<String, String>,
         targets: std::collections::BTreeMap<String, TargetOut>,
     }
+
+    let cfg = state.storage.get_config().await;
     let mut targets = std::collections::BTreeMap::new();
     for t in state.storage.health_targets().await {
         targets.insert(
             sanitize_ipxe_key(&t.id),
             TargetOut {
                 file: t.file.clone(),
+                path: t.path.clone(),
                 iqn: t.iqn.clone(),
                 nbd_port: t.nbd_port,
                 root_dev: t.root_dev.clone(),
@@ -68,14 +92,18 @@ async fn health(State(state): State<Arc<AppState>>) -> Response<Body> {
             },
         );
     }
+
     let uptime = state.start.elapsed().as_secs_f64();
-    let body = serde_json::to_string_pretty(&HealthOut {
+    let body = serde_json::to_string_pretty(&StatusOut {
         status: "ok",
-        version: "2.5.0-standalone",
+        version: "2.0.0-standalone",
         pid: std::process::id(),
         uptime_seconds: uptime,
-        mode: format!("{:?}", state.config.boot_mode).to_lowercase(),
-        standalone: true,
+        rss_mb: get_rss_mb(),
+        boot_mode: format!("{:?}", cfg.boot_mode).to_lowercase(),
+        default_win_mode: cfg.json_cfg.windows_boot.default_mode,
+        default_image: cfg.json_cfg.default_image,
+        mac_bindings: cfg.json_cfg.mac_bindings,
         targets,
     })
     .unwrap_or_else(|_| "{}".into());
@@ -132,9 +160,9 @@ async fn serve_static(path: &str, is_head: bool) -> Response<Body> {
     }
 }
 
-async fn standalone_ipxe_menu(State(state): State<Arc<AppState>>) -> Response<Body> {
-    state.storage.scan_and_export().await;
-    let script = state.storage.build_standalone_ipxe_menu().await;
+async fn render_ipxe_menu(storage: &StorageManager, client_mac: Option<&str>) -> Response<Body> {
+    storage.scan_and_export().await;
+    let script = storage.build_standalone_ipxe_menu(client_mac).await;
 
     Response::builder()
         .status(StatusCode::OK)
@@ -144,60 +172,249 @@ async fn standalone_ipxe_menu(State(state): State<Arc<AppState>>) -> Response<Bo
         .unwrap()
 }
 
-async fn handle_route(
+// Handler for root path "/"
+async fn root_handler(
     State(state): State<Arc<AppState>>,
     ConnectInfo(client): ConnectInfo<SocketAddr>,
+    Query(params): Query<HashMap<String, String>>,
     req: Request,
 ) -> Response<Body> {
     let method = req.method().clone();
-    let uri = req.uri().clone();
-    let pure_path = uri.path();
-    req_log(&client, &format!("{} {}", method, uri));
+    req_log(&client, &format!("{} /", method));
 
-    let is_head = method == Method::HEAD;
-    if (method == Method::GET || is_head) && pure_path == "/vtoy/vmlinuz" {
-        return serve_static(state.config.kernel_path.as_str(), is_head).await;
-    }
-    if (method == Method::GET || is_head) && pure_path == "/vtoy/initramfs.img" {
-        return serve_static(state.config.initrd_path.as_str(), is_head).await;
-    }
+    let ua = req
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let is_ipxe = ua.contains("iPXE") || params.get("format").map(|v| v.as_str()) == Some("ipxe");
+    let mac = params.get("mac").map(|s| s.as_str());
 
-    // Serve ISO or raw disk files directly for HTTP sanboot
-    if (method == Method::GET || is_head) && pure_path.starts_with("/iso/") {
-        let filename = pure_path.trim_start_matches("/iso/");
-        let filepath = format!("{}/{}", state.config.vtoy_dir, filename);
-        return serve_static(&filepath, is_head).await;
-    }
-
-    if matches!(pure_path, "/boot.ipxe" | "/ipxe" | "/") {
+    if is_ipxe {
         if method == Method::GET {
-            return standalone_ipxe_menu(State(state)).await;
+            return render_ipxe_menu(&state.storage, mac).await;
         }
         if method == Method::HEAD {
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/plain")
-                .header(header::CONTENT_LENGTH, 0)
                 .body(Body::empty())
                 .unwrap();
         }
     }
 
-    if pure_path == "/api/health" || pure_path == "/health" {
-        return health(State(state)).await;
+    if method == Method::GET || method == Method::HEAD {
+        let body = if method == Method::HEAD {
+            Body::empty()
+        } else {
+            Body::from(DASHBOARD_HTML)
+        };
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .header(header::CONTENT_LENGTH, DASHBOARD_HTML.len())
+            .body(body)
+            .unwrap();
     }
 
     Response::builder()
-        .status(StatusCode::NOT_FOUND)
-        .header(header::CONTENT_TYPE, "text/plain")
-        .body(Body::from(format!("404 Not Found: {}", pure_path)))
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .body(Body::empty())
+        .unwrap()
+}
+
+// Handler for /boot.ipxe and /ipxe/menu
+async fn ipxe_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    Query(params): Query<HashMap<String, String>>,
+    req: Request,
+) -> Response<Body> {
+    let method = req.method().clone();
+    req_log(&client, &format!("{} /boot.ipxe", method));
+
+    let mac = params.get("mac").map(|s| s.as_str());
+    if method == Method::GET {
+        return render_ipxe_menu(&state.storage, mac).await;
+    }
+    if method == Method::HEAD {
+        return Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/plain")
+            .body(Body::empty())
+            .unwrap();
+    }
+
+    Response::builder()
+        .status(StatusCode::METHOD_NOT_ALLOWED)
+        .body(Body::empty())
+        .unwrap()
+}
+
+// Handlers for static boot files
+async fn vmlinuz_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response<Body> {
+    let method = req.method().clone();
+    req_log(&client, &format!("{} /vtoy/vmlinuz", method));
+    let cfg = state.storage.get_config().await;
+    serve_static(&cfg.kernel_path, method == Method::HEAD).await
+}
+
+async fn initramfs_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    req: Request,
+) -> Response<Body> {
+    let method = req.method().clone();
+    req_log(&client, &format!("{} /vtoy/initramfs.img", method));
+    let cfg = state.storage.get_config().await;
+    serve_static(&cfg.initrd_path, method == Method::HEAD).await
+}
+
+async fn iso_handler(
+    State(state): State<Arc<AppState>>,
+    ConnectInfo(client): ConnectInfo<SocketAddr>,
+    AxumPath(file): AxumPath<String>,
+    req: Request,
+) -> Response<Body> {
+    let method = req.method().clone();
+    req_log(&client, &format!("{} /iso/{}", method, file));
+    let cfg = state.storage.get_config().await;
+    let fullpath = format!("{}/{}", cfg.vtoy_dir, file);
+    serve_static(&fullpath, method == Method::HEAD).await
+}
+
+async fn api_preview(State(state): State<Arc<AppState>>) -> Response<Body> {
+    let script = state.storage.build_standalone_ipxe_menu(None).await;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .body(Body::from(script))
+        .unwrap()
+}
+
+async fn api_rescan(State(state): State<Arc<AppState>>) -> Response<Body> {
+    state.storage.scan_and_export().await;
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"status":"rescanned"}"#))
+        .unwrap()
+}
+
+#[derive(Deserialize)]
+struct SetWinModeIn {
+    mode: String,
+}
+
+async fn api_set_win_mode(
+    State(state): State<Arc<AppState>>,
+    axum::Json(payload): axum::Json<SetWinModeIn>,
+) -> Response<Body> {
+    if let Err(e) = state.storage.set_default_win_mode(&payload.mode).await {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(e))
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
+}
+
+#[derive(Deserialize)]
+struct SetDefaultImageIn {
+    image: String,
+}
+
+async fn api_set_default_image(
+    State(state): State<Arc<AppState>>,
+    axum::Json(payload): axum::Json<SetDefaultImageIn>,
+) -> Response<Body> {
+    let img = if payload.image.is_empty() {
+        None
+    } else {
+        Some(payload.image)
+    };
+    if let Err(e) = state.storage.set_default_image(img).await {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(e))
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
+}
+
+#[derive(Deserialize)]
+struct MacBindingIn {
+    mac: String,
+    #[serde(default)]
+    image: Option<String>,
+}
+
+async fn api_add_mac_binding(
+    State(state): State<Arc<AppState>>,
+    axum::Json(payload): axum::Json<MacBindingIn>,
+) -> Response<Body> {
+    let img = payload.image.unwrap_or_default();
+    if let Err(e) = state.storage.set_mac_binding(payload.mac, img).await {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(e))
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
+        .unwrap()
+}
+
+async fn api_remove_mac_binding(
+    State(state): State<Arc<AppState>>,
+    axum::Json(payload): axum::Json<MacBindingIn>,
+) -> Response<Body> {
+    if let Err(e) = state.storage.remove_mac_binding(&payload.mac).await {
+        return Response::builder()
+            .status(StatusCode::INTERNAL_SERVER_ERROR)
+            .body(Body::from(e))
+            .unwrap();
+    }
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"ok":true}"#))
         .unwrap()
 }
 
 pub fn make_app(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/", any(handle_route))
-        .route("/{*path}", any(handle_route))
+        .route("/", any(root_handler))
+        .route("/boot.ipxe", any(ipxe_handler))
+        .route("/ipxe/menu", any(ipxe_handler))
+        .route("/ipxe", any(ipxe_handler))
+        .route("/vtoy/vmlinuz", any(vmlinuz_handler))
+        .route("/vtoy/initramfs.img", any(initramfs_handler))
+        .route("/iso/{*file}", any(iso_handler))
+        .route("/api/status", get(api_status))
+        .route("/api/health", get(api_status))
+        .route("/api/ipxe/preview", get(api_preview))
+        .route("/api/rescan", post(api_rescan))
+        .route("/api/config/default-win-mode", post(api_set_win_mode))
+        .route("/api/config/default-image", post(api_set_default_image))
+        .route(
+            "/api/config/mac-binding",
+            post(api_add_mac_binding).delete(api_remove_mac_binding),
+        )
         .with_state(state)
 }
 

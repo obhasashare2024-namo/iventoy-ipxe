@@ -2,8 +2,9 @@ use crate::config::{BootMode, Config};
 use crate::image::{detect_disk_format, has_partition_table, is_windows_image, DiskFormat};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 pub fn sanitize_ipxe_key(key: &str) -> String {
     let clean: String = key
@@ -51,7 +52,7 @@ pub struct TargetInfo {
 }
 
 pub struct StorageManager {
-    pub config: Config,
+    pub config: Arc<RwLock<Config>>,
     targets: Mutex<HashMap<String, Target>>,
     used_tids: Mutex<HashSet<u32>>,
     used_ports: Mutex<HashSet<u16>>,
@@ -73,16 +74,47 @@ async fn run_cmd(args: &[&str]) {
 impl StorageManager {
     pub fn new(config: Config) -> Self {
         Self {
-            config,
+            config: Arc::new(RwLock::new(config)),
             targets: Mutex::new(HashMap::new()),
             used_tids: Mutex::new(HashSet::new()),
             used_ports: Mutex::new(HashSet::new()),
         }
     }
 
+    pub async fn get_config(&self) -> Config {
+        self.config.read().await.clone()
+    }
+
+    pub async fn set_default_win_mode(&self, mode: &str) -> Result<(), String> {
+        let mut cfg = self.config.write().await;
+        cfg.json_cfg.windows_boot.default_mode = mode.to_string();
+        crate::config::save_iventoy_json(&cfg.vtoy_dir, &cfg.json_cfg)
+    }
+
+    pub async fn set_default_image(&self, img: Option<String>) -> Result<(), String> {
+        let mut cfg = self.config.write().await;
+        cfg.json_cfg.default_image = img;
+        crate::config::save_iventoy_json(&cfg.vtoy_dir, &cfg.json_cfg)
+    }
+
+    pub async fn set_mac_binding(&self, mac: String, img: String) -> Result<(), String> {
+        let mut cfg = self.config.write().await;
+        let clean_mac = mac.trim().to_ascii_lowercase().replace('-', ":");
+        cfg.json_cfg.mac_bindings.insert(clean_mac, img);
+        crate::config::save_iventoy_json(&cfg.vtoy_dir, &cfg.json_cfg)
+    }
+
+    pub async fn remove_mac_binding(&self, mac: &str) -> Result<(), String> {
+        let mut cfg = self.config.write().await;
+        let clean_mac = mac.trim().to_ascii_lowercase().replace('-', ":");
+        cfg.json_cfg.mac_bindings.remove(&clean_mac);
+        crate::config::save_iventoy_json(&cfg.vtoy_dir, &cfg.json_cfg)
+    }
+
     pub async fn alloc_tid(&self) -> u32 {
+        let base = self.config.read().await.tgt_base_tid;
         let mut used = self.used_tids.lock().await;
-        let mut tid = self.config.tgt_base_tid;
+        let mut tid = base;
         while used.contains(&tid) {
             tid += 1;
         }
@@ -91,8 +123,9 @@ impl StorageManager {
     }
 
     pub async fn alloc_port(&self) -> u16 {
+        let base = self.config.read().await.nbd_base_port;
         let mut used = self.used_ports.lock().await;
-        let mut p = self.config.nbd_base_port;
+        let mut p = base;
         while used.contains(&p) {
             p += 1;
         }
@@ -119,44 +152,26 @@ impl StorageManager {
         .await;
     }
 
-    async fn export_nbd(&self, port: u16, path: &str, format: DiskFormat) -> Option<Child> {
-        let fmt_arg = format.as_qemu_arg();
-        log(&format!("Exporting NBD: Port={} Format={} Backing={}", port, fmt_arg, path));
+    async fn export_nbd(&self, port: u16, path: &str, fmt: DiskFormat) -> Option<Child> {
+        let fmt_arg = fmt.as_qemu_arg();
+        log(&format!("Exporting NBD on port {}: Backing={} (format={})", port, path, fmt_arg));
+        let mut cmd = Command::new("qemu-nbd");
+        cmd.arg("-t")
+            .arg("-p")
+            .arg(port.to_string())
+            .arg("-x")
+            .arg("vtoy")
+            .arg("-f")
+            .arg(fmt_arg);
+        cmd.arg(path);
 
-        // High performance sparse + zero copy options
-        let child = Command::new("qemu-nbd")
-            .args([
-                "-t",
-                "-f", fmt_arg,
-                "-p", &port.to_string(),
-                "-b", "0.0.0.0",
-                "--detect-zeroes=on",
-                "--discard=unmap",
-                "--aio=io_uring",
-                "--cache=none",
-                path,
-            ])
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn();
-
-        match child {
-            Ok(mut c) => {
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                match c.try_wait() {
-                    Ok(Some(status)) => {
-                        eprintln!(
-                            "[ERR] qemu-nbd for {} exited immediately (code {:?})",
-                            path,
-                            status.code()
-                        );
-                        None
-                    }
-                    _ => Some(c),
-                }
+        match cmd.spawn() {
+            Ok(child) => {
+                log(&format!("Spawned qemu-nbd PID={:?} on port {}", child.id(), port));
+                Some(child)
             }
             Err(e) => {
-                eprintln!("[ERR] failed to spawn qemu-nbd for {}: {}", path, e);
+                eprintln!("[ERR] Failed to spawn qemu-nbd on port {}: {}", port, e);
                 None
             }
         }
@@ -171,14 +186,19 @@ impl StorageManager {
         ])
         .await;
         run_cmd(&[
+            "tgtadm", "--lld", "iscsi", "--op", "delete", "--mode", "logicalunit",
+            "--tid", &t, "--lun", "1",
+        ])
+        .await;
+        run_cmd(&[
             "tgtadm", "--lld", "iscsi", "--op", "delete", "--mode", "target",
             "--tid", &t,
         ])
         .await;
     }
 
-    async fn unexport_one(&self, t: &mut Target) {
-        if self.config.boot_mode == BootMode::Iscsi || t.info.is_windows {
+    async fn unexport_one(&self, t: &mut Target, boot_mode: BootMode) {
+        if boot_mode == BootMode::Iscsi || t.info.is_windows {
             self.unexport_iscsi(t.info.tid).await;
         }
         if let Some(mut c) = t.child.take() {
@@ -187,16 +207,21 @@ impl StorageManager {
     }
 
     pub async fn shutdown_all(&self) {
+        let boot_mode = self.config.read().await.boot_mode;
         let mut map = self.targets.lock().await;
         for (_, t) in map.iter_mut() {
-            self.unexport_one(t).await;
+            self.unexport_one(t, boot_mode).await;
         }
         map.clear();
     }
 
     /// Re-scan VTOY_DIR; exports new images, respawns dead qemu-nbd, unexports vanished ones.
     pub async fn scan_and_export(&self) {
-        let vtoy_dir = self.config.vtoy_dir.clone();
+        let (vtoy_dir, iqn_prefix, boot_mode, json_cfg) = {
+            let cfg = self.config.read().await;
+            (cfg.vtoy_dir.clone(), cfg.iqn_prefix.clone(), cfg.boot_mode, cfg.json_cfg.clone())
+        };
+
         if !tokio::fs::metadata(&vtoy_dir).await.is_ok() {
             if let Err(e) = tokio::fs::create_dir_all(&vtoy_dir).await {
                 eprintln!("[ERR] Could not create {}: {}", vtoy_dir, e);
@@ -208,7 +233,6 @@ impl StorageManager {
             while let Ok(Some(entry)) = rd.next_entry().await {
                 let name = entry.file_name().to_string_lossy().to_string();
                 let lower = name.to_ascii_lowercase();
-                // Filter all supported disk & ISO formats
                 if lower.ends_with(".vtoy")
                     || lower.ends_with(".img")
                     || lower.ends_with(".raw")
@@ -235,13 +259,27 @@ impl StorageManager {
                 let fullpath = format!("{}/{}", vtoy_dir, filename);
                 let tid = self.alloc_tid().await;
                 let port = self.alloc_port().await;
-                let iqn = format!("{}:{}", self.config.iqn_prefix, sanitize_ipxe_key(&vtoy_id));
+                let iqn = format!("{}:{}", iqn_prefix, sanitize_ipxe_key(&vtoy_id));
                 let partitioned = has_partition_table(&fullpath).await;
-                let root_dev = if partitioned {
+                
+                // Allow manual override from iventoy.json images config
+                let mut root_dev = if partitioned {
                     "/dev/nbd0p2".to_string()
                 } else {
                     "/dev/nbd0".to_string()
                 };
+
+                for ctrl in &json_cfg.control {
+                    if let (Some(f), Some(r)) = (ctrl.get("file"), ctrl.get("root_dev")) {
+                        if f.as_str() == Some(&filename) {
+                            if let Some(r_str) = r.as_str() {
+                                root_dev = r_str.to_string();
+                                println!("[config] Overriding root_dev for {} -> {}", filename, root_dev);
+                            }
+                        }
+                    }
+                }
+
                 let fmt = detect_disk_format(&fullpath).await;
                 let is_win = is_windows_image(&filename);
 
@@ -260,20 +298,18 @@ impl StorageManager {
                     is_windows: is_win,
                 };
 
-                // Export storage backend
                 let mut child = None;
-                if is_win || self.config.boot_mode == BootMode::Iscsi {
+                if is_win || boot_mode == BootMode::Iscsi {
                     self.export_iscsi(tid, &iqn, &fullpath).await;
                 }
-                // Also spawn NBD for vtoyboot or linux NBD mode
-                if !is_win || self.config.boot_mode == BootMode::Nbd {
+                if !is_win || boot_mode == BootMode::Nbd {
                     child = self.export_nbd(port, &fullpath, fmt).await;
                 }
 
                 map.insert(vtoy_id.clone(), Target { info, child });
             } else {
                 let t = map.get_mut(&vtoy_id).unwrap();
-                if self.config.boot_mode == BootMode::Nbd || (!t.info.is_windows && t.child.is_some()) {
+                if boot_mode == BootMode::Nbd || (!t.info.is_windows && t.child.is_some()) {
                     let need_respawn = match t.child.as_mut() {
                         Some(c) => c.try_wait().ok().flatten().is_some(),
                         None => true,
@@ -283,41 +319,40 @@ impl StorageManager {
                         log(&format!("qemu-nbd died, respawning on port {}", port));
                         let path = t.info.path.clone();
                         let fmt = detect_disk_format(&path).await;
-                        if let Some(child) = self.export_nbd(port, &path, fmt).await {
-                            t.child = Some(child);
-                            t.info.proc_pid = t.child.as_ref().and_then(|c| c.id());
-                            t.info.alive = Some(true);
-                        }
+                        t.child = self.export_nbd(port, &path, fmt).await;
                     }
                 }
             }
         }
 
         let mut map = self.targets.lock().await;
-        let stale: Vec<String> = map
+        let dead_keys: Vec<String> = map
             .keys()
             .filter(|k| !active_ids.contains(*k))
             .cloned()
             .collect();
-        for k in stale {
+        for k in dead_keys {
             if let Some(mut t) = map.remove(&k) {
-                self.unexport_one(&mut t).await;
-                self.used_tids.lock().await.remove(&t.info.tid);
-                self.used_ports.lock().await.remove(&t.info.nbd_port);
+                log(&format!("Unexporting vanished image: {}", k));
+                self.unexport_one(&mut t, boot_mode).await;
             }
         }
     }
 
     pub async fn health_targets(&self) -> Vec<TargetInfo> {
+        let boot_mode = self.config.read().await.boot_mode;
         let mut map = self.targets.lock().await;
-        let mut out: Vec<TargetInfo> = Vec::with_capacity(map.len());
+        let mut out = Vec::new();
         for (_, t) in map.iter_mut() {
             let mut info = t.info.clone();
-            if self.config.boot_mode == BootMode::Nbd || t.child.is_some() {
+            if boot_mode == BootMode::Nbd || t.child.is_some() {
                 info.alive = Some(match t.child.as_mut() {
                     Some(c) => c.try_wait().ok().flatten().is_none(),
                     None => false,
                 });
+                info.proc_pid = t.child.as_ref().and_then(|c| c.id());
+            } else {
+                info.alive = Some(true);
             }
             out.push(info);
         }
@@ -325,29 +360,70 @@ impl StorageManager {
         out
     }
 
-    /// Builds 100% standalone, independent iPXE menu (No upstream iVentoy dependency)
-    pub async fn build_standalone_ipxe_menu(&self) -> String {
+    /// Builds 100% standalone, independent iPXE menu with Ventoy-parity On-Screen Submenus
+    pub async fn build_standalone_ipxe_menu(&self, client_mac: Option<&str>) -> String {
         let snapshot = self.health_targets().await;
-        // Apply win_cfg defaults
-        let win_cfg = &self.config.json_cfg.windows_boot;
-        let default_win_suffix = if win_cfg.default_mode == "vtoyboot" { "win_vtoy_" } else { "win_iscsi_" };
+        let cfg = self.config.read().await.clone();
+        let win_cfg = &cfg.json_cfg.windows_boot;
+
         let mut script = String::new();
 
         script.push_str("#!ipxe\n\n");
+        script.push_str("# Styling & Palette (Ventoy Cyber Theme)\n");
+        script.push_str("cpair --foreground 7 --background 0 0\n");
+        script.push_str("cpair --foreground 6 --background 0 1\n");
+        script.push_str("cpair --foreground 3 --background 0 2\n\n");
+
         script.push_str("set menu-timeout 15000\n");
-        script.push_str("set submenu-timeout 15000\n");
-        let default_item = snapshot.iter().find(|i| i.is_windows)
-            .map(|i| format!("{}{}", default_win_suffix, sanitize_ipxe_key(&i.id)))
-            .or_else(|| snapshot.first().map(|i| format!("vdisk_{}", sanitize_ipxe_key(&i.id))))
-            .unwrap_or_else(|| "shell".into());
-        script.push_str(&format!("isset ${{menu-default}} || set menu-default {}\n\n", default_item));
+        script.push_str("set submenu-timeout 15000\n\n");
+
+        // Determine default item based on MAC binding -> global default -> first item
+        let clean_mac = client_mac.map(|m| m.trim().to_ascii_lowercase().replace('-', ":"));
+        let mac_matched_image = clean_mac.as_ref().and_then(|m| cfg.json_cfg.mac_bindings.get(m));
+
+        let default_item = if let Some(target_file) = mac_matched_image {
+            // Find target by file name
+            snapshot.iter().find(|i| &i.file == target_file)
+                .map(|i| {
+                    if i.is_windows {
+                        format!("win_menu_{}", sanitize_ipxe_key(&i.id))
+                    } else if i.file.to_ascii_lowercase().ends_with(".iso") {
+                        format!("iso_{}", sanitize_ipxe_key(&i.id))
+                    } else {
+                        format!("vdisk_{}", sanitize_ipxe_key(&i.id))
+                    }
+                })
+        } else if let Some(ref def_img) = cfg.json_cfg.default_image {
+            snapshot.iter().find(|i| &i.file == def_img)
+                .map(|i| {
+                    if i.is_windows {
+                        format!("win_menu_{}", sanitize_ipxe_key(&i.id))
+                    } else if i.file.to_ascii_lowercase().ends_with(".iso") {
+                        format!("iso_{}", sanitize_ipxe_key(&i.id))
+                    } else {
+                        format!("vdisk_{}", sanitize_ipxe_key(&i.id))
+                    }
+                })
+        } else {
+            None
+        };
+
+        let final_default = default_item.unwrap_or_else(|| {
+            snapshot.iter().find(|i| i.is_windows)
+                .map(|i| format!("win_menu_{}", sanitize_ipxe_key(&i.id)))
+                .or_else(|| snapshot.first().map(|i| format!("vdisk_{}", sanitize_ipxe_key(&i.id))))
+                .unwrap_or_else(|| "shell".into())
+        });
+
+        script.push_str(&format!("isset ${{menu-default}} || set menu-default {}\n\n", final_default));
 
         script.push_str(":start\n");
-        script.push_str("menu iVentoy-Rust Standalone PXE Network Boot\n\n");
+        script.push_str("menu iVentoy-Rust Network Boot Menu (Arrow keys to navigate, Enter to boot)\n\n");
 
         let mut win_items = Vec::new();
         let mut vdisk_items = Vec::new();
         let mut iso_items = Vec::new();
+        let mut submenus = Vec::new();
         let mut handlers = Vec::new();
 
         for info in &snapshot {
@@ -355,65 +431,77 @@ impl StorageManager {
             let label = sanitize_ipxe_text(&info.file);
 
             if info.is_windows {
-                // Windows Dual Boot Modes
+                // Windows Ventoy-style Submenu Item on Main Menu
+                let menu_key = format!("win_menu_{}", safe_id);
+                win_items.push(format!("item {} [WIN] {} (Press Enter for Boot Modes)", menu_key, label));
+
                 let iscsi_key = format!("win_iscsi_{}", safe_id);
                 let vtoy_key = format!("win_vtoy_{}", safe_id);
+                let preferred_win_key = if win_cfg.default_mode == "vtoyboot" { &vtoy_key } else { &iscsi_key };
 
-                win_items.push(format!("item {} [Win] {} (iSCSI Native Sanboot)", iscsi_key, label));
-                win_items.push(format!("item {} [Win] {} (Ventoy vtoyboot Hook)", vtoy_key, label));
+                // Build Ventoy-style Submenu block
+                let mut sm = String::new();
+                sm.push_str(&format!(":{}\n", menu_key));
+                sm.push_str(&format!("menu Select Boot Mode for {}:\n", label));
+                sm.push_str(&format!("item {} [1] Native iSCSI SANBOOT (Fastest, zero driver change)\n", iscsi_key));
+                sm.push_str(&format!("item {} [2] Ventoy vtoyboot NBD Hook (Virtual disk driver hook)\n", vtoy_key));
+                sm.push_str("item start               [3] <-- Back to Main Menu\n\n");
+                sm.push_str(&format!("choose --timeout ${{submenu-timeout}} --default {} win_choice_{} || goto start\n", preferred_win_key, safe_id));
+                sm.push_str(&format!("goto ${{win_choice_{}}}\n", safe_id));
+                submenus.push(sm);
 
-                // Handler: iSCSI
+                // Submenu Handler: iSCSI
                 let iqn = sanitize_ipxe_text(&info.iqn);
                 handlers.push(format!(
-                    ":{}\necho Booting Windows via iSCSI Target ({}) ...\nset root-path iscsi:${{next-server}}::::{}\nsanboot iscsi:${{next-server}}::::{} || goto boot_failed\n",
-                    iscsi_key, iqn, iqn, iqn
+                    ":{}\necho Booting {} via Native iSCSI Target ({}) ...\nset root-path iscsi:${{next-server}}::::{}\nsanboot iscsi:${{next-server}}::::{} || goto boot_failed\n",
+                    iscsi_key, label, iqn, iqn, iqn
                 ));
 
-                // Handler: vtoyboot
+                // Submenu Handler: vtoyboot Hook
                 handlers.push(format!(
-                    ":{}\necho Booting Windows via Ventoy NBD Hook (Port {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
-                    vtoy_key, info.nbd_port, self.config.vtoy_kernel_url, info.nbd_port, info.root_dev, self.config.vtoy_initrd_url
+                    ":{}\necho Booting {} via Ventoy NBD Hook (Port {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
+                    vtoy_key, label, info.nbd_port, cfg.vtoy_kernel_url, info.nbd_port, info.root_dev, cfg.vtoy_initrd_url
                 ));
             } else if info.file.to_ascii_lowercase().ends_with(".iso") {
                 let item_key = format!("iso_{}", safe_id);
                 iso_items.push(format!("item {} [ISO] {}", item_key, label));
                 handlers.push(format!(
-                    ":{}\necho Booting ISO via HTTP sanboot ...\nsanboot http://${{next-server}}:{}/iso/{} || goto boot_failed\n",
-                    item_key, self.config.bridge_port, info.file
+                    ":{}\necho Booting {} via HTTP Direct sanboot ...\nsanboot http://${{next-server}}:{}/iso/{} || goto boot_failed\n",
+                    item_key, label, cfg.bridge_port, info.file
                 ));
             } else {
                 let item_key = format!("vdisk_{}", safe_id);
                 vdisk_items.push(format!("item {} [{}] {}", item_key, info.format.to_uppercase(), label));
 
                 handlers.push(format!(
-                    ":{}\necho Booting Virtual Disk via NBD (Port {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
-                    item_key, info.nbd_port, self.config.vtoy_kernel_url, info.nbd_port, info.root_dev, self.config.vtoy_initrd_url
+                    ":{}\necho Booting {} via NBD (Port {}, Root {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
+                    item_key, label, info.nbd_port, info.root_dev, cfg.vtoy_kernel_url, info.nbd_port, info.root_dev, cfg.vtoy_initrd_url
                 ));
             }
         }
 
         if !win_items.is_empty() {
-            script.push_str("item --gap -- --------------- Windows Native Systems ---------------\n");
+            script.push_str("item --gap -- ==================== Windows Systems ====================\n");
             for it in win_items {
                 script.push_str(&format!("{}\n", it));
             }
         }
 
         if !vdisk_items.is_empty() {
-            script.push_str("\nitem --gap -- ----------------- Virtual Disks -----------------\n");
+            script.push_str("\nitem --gap -- ==================== Linux & Virtual Disks ==============\n");
             for it in vdisk_items {
                 script.push_str(&format!("{}\n", it));
             }
         }
 
         if !iso_items.is_empty() {
-            script.push_str("\nitem --gap -- ---------------- ISO Installations ---------------\n");
+            script.push_str("\nitem --gap -- ==================== ISO Direct Install =================\n");
             for it in iso_items {
                 script.push_str(&format!("{}\n", it));
             }
         }
 
-        script.push_str("\nitem --gap -- ---------------- Operations & Tools ----------------\n");
+        script.push_str("\nitem --gap -- ==================== Operations & Tools =================\n");
         script.push_str("item shell  Drop into iPXE Shell\n");
         script.push_str("item reboot Reboot Computer\n");
         script.push_str("item exit   Exit to Local BIOS/UEFI\n\n");
@@ -422,52 +510,20 @@ impl StorageManager {
         script.push_str("goto ${selected}\n\n");
 
         script.push_str(":shell\nshell\n\n:reboot\nreboot\n\n:exit\nexit\n\n");
-        script.push_str(":boot_failed\necho Boot failed! Dropping to shell in 5 seconds...\nsleep 5\ngoto shell\n\n");
+        script.push_str(":boot_failed\necho Boot failed or cancelled! Dropping to shell in 5 seconds...\nsleep 5\ngoto shell\n\n");
 
+        // Submenus
+        for sm in submenus {
+            script.push_str(&sm);
+            script.push_str("\n");
+        }
+
+        // Action Handlers
         for h in handlers {
             script.push_str(&h);
             script.push_str("\n");
         }
 
         script
-    }
-
-    /// Legacy menu generator for backward compatibility
-    #[allow(dead_code)]
-    pub async fn build_vtoy_menu(&self) -> (String, String) {
-        let snapshot = self.health_targets().await;
-        let mut menu_items: Vec<String> = Vec::new();
-        let mut handlers: Vec<String> = Vec::new();
-        menu_items.push("\nitem --gap -- ------------- VTOY Images -------------".to_string());
-        for info in &snapshot {
-            let safe_id = sanitize_ipxe_key(&info.id);
-            let label = sanitize_ipxe_text(&info.file);
-            let item_key = format!("vtoy_{}", safe_id);
-            menu_items.push(format!("item {} [VTOY] {}", item_key, label));
-            let h = if self.config.boot_mode == BootMode::Iscsi {
-                let iqn = sanitize_ipxe_text(&info.iqn);
-                vec![
-                    format!(":{}", item_key),
-                    format!("echo Booting {} via iSCSI SANBOOT...", label),
-                    format!("set root-path iscsi:${{next-server}}::::{}", iqn),
-                    format!("sanboot iscsi:${{next-server}}::::{} || goto boot_failed", iqn),
-                    "boot".to_string(),
-                ]
-            } else {
-                vec![
-                    format!(":{}", item_key),
-                    format!("echo Booting {} via NBD root ({})...", label, info.root_dev),
-                    format!(
-                        "kernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet",
-                        self.config.vtoy_kernel_url, info.nbd_port, info.root_dev
-                    ),
-                    format!("initrd {}", self.config.vtoy_initrd_url),
-                    "boot".to_string(),
-                ]
-            };
-            handlers.push(h.join("\n"));
-        }
-        handlers.push(":boot_failed\necho Boot failed! Dropping to shell...\nshell\n".to_string());
-        (menu_items.join("\n"), handlers.join("\n"))
     }
 }

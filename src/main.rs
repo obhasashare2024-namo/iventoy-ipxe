@@ -71,8 +71,7 @@ async fn main() {
     }
 
     let state = Arc::new(server::AppState {
-        storage: storage::StorageManager::new(cfg.clone()),
-        config: cfg.clone(),
+        storage: Arc::new(storage::StorageManager::new(cfg.clone())),
         start: Instant::now(),
     });
 
