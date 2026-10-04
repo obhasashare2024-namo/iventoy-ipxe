@@ -52,17 +52,25 @@
 
 ---
 
-## 🖥️ 真機實測端到端驗證 (Physical Verification)
+## 📸 視覺展示 (Visual Showcase)
 
-本專案已在 Artix Linux (29 號節點，Intel Tiger Lake / RTX 3070 平台) 進行完整的真機端到端網絡啟動驗證：
+### 1. 現代化 Web Cyber-Industrial 控制台 (Web Management Console)
+瀏覽器直接存取 `http://<server-ip>:26001/`，提供實時伺服器效能監控 (4.8MB RSS / 0% CPU)、Windows 啟動模式全域熱切換、虛擬磁碟動態鏡像庫、客戶端 MAC 預選引導綁定與 iPXE 實時終端模擬器：
 
-1. **引導鏡像**：8GB Btrfs 虛擬磁碟 (`anitix8g.vhd.vtoy`)
-2. **啟動鏈路**：QEMU UEFI PXE → iPXE DHCP → `iventoy-ipxe` 動態注入菜單 → NBD `/dev/nbd0p3` 掛載 → runit stage 2 → `seatd` / `turnstiled` / `slimski` / Xorg 1.21
-3. **驗證結果**：**100% 成功進入 antiX 26 IceWM 完整彩色圖形桌面**！
+![Web Dashboard](docs/screenshots/dashboard_screenshot.png)
+
+### 2. 客戶端 iPXE 開機引導與多系統手選菜單 (Client iPXE Boot Menu)
+客戶端透過 PXE/iPXE 網路引導，自動獲取 Cyber 風格菜單。Windows 系統支援二級模式選擇 (Native iSCSI / Ventoy Hook)，Linux/虛擬磁碟支援秒級手選與快捷診斷：
+
+![Client Boot Menu](docs/screenshots/kvm_client_boot_menu.png)
+
+### 3. 客戶端系統桌面運行實證 (System Desktop Verification)
+8GB Btrfs 虛擬磁碟 (`anitix8g.vhd.vtoy`) 經由動態 NBD 塊設備串流，成功進入 antiX 26 完整彩色圖形桌面：
 
 ![antiX 26 Desktop Screenshot](docs/screenshots/antix26_desktop_screenshot.png)
 
-*實機截圖規格：1280x800 分辨率，Conky 實時儀表板正常運行，記憶體僅佔用 263MB。*
+*實機截圖規格：1280x800 分辨率，Conky 實時儀表板正常運行，系統記憶體僅佔用 263MB。*
+
 
 ---
 

@@ -370,9 +370,9 @@ impl StorageManager {
 
         script.push_str("#!ipxe\n\n");
         script.push_str("# Styling & Palette (Ventoy Cyber Theme)\n");
-        script.push_str("cpair --foreground 7 --background 0 0\n");
-        script.push_str("cpair --foreground 6 --background 0 1\n");
-        script.push_str("cpair --foreground 3 --background 0 2\n\n");
+        script.push_str("cpair --foreground 7 --background 0 0 ||\n");
+        script.push_str("cpair --foreground 6 --background 0 1 ||\n");
+        script.push_str("cpair --foreground 3 --background 0 2 ||\n\n");
 
         script.push_str("set menu-timeout 15000\n");
         script.push_str("set submenu-timeout 15000\n\n");
