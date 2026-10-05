@@ -157,6 +157,8 @@ impl StorageManager {
         log(&format!("Exporting NBD on port {}: Backing={} (format={})", port, path, fmt_arg));
         let mut cmd = Command::new("qemu-nbd");
         cmd.arg("-t")
+            .arg("-e")
+            .arg("16")
             .arg("-p")
             .arg(port.to_string())
             .arg("-x")
@@ -264,7 +266,11 @@ impl StorageManager {
                 
                 // Allow manual override from iventoy.json images config
                 let mut root_dev = if partitioned {
-                    "/dev/nbd0p2".to_string()
+                    if filename.contains("anitix") {
+                        "/dev/nbd0p3".to_string()
+                    } else {
+                        "/dev/nbd0p2".to_string()
+                    }
                 } else {
                     "/dev/nbd0".to_string()
                 };
@@ -459,7 +465,7 @@ impl StorageManager {
 
                 // Submenu Handler: vtoyboot Hook
                 handlers.push(format!(
-                    ":{}\necho Booting {} via Ventoy NBD Hook (Port {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
+                    ":{}\necho Booting {} via Ventoy NBD Hook (Port {}) ...\nkernel {} initrd=initramfs.img console=ttyS0 console=tty0 ip=dhcp nbdroot=${{next-server}} nbdport={} nbdmaxpart=16 root={} rw nosplash verbose\ninitrd {}\nboot || goto boot_failed\n",
                     vtoy_key, label, info.nbd_port, cfg.vtoy_kernel_url, info.nbd_port, info.root_dev, cfg.vtoy_initrd_url
                 ));
             } else if info.file.to_ascii_lowercase().ends_with(".iso") {
@@ -474,7 +480,7 @@ impl StorageManager {
                 vdisk_items.push(format!("item {} [{}] {}", item_key, info.format.to_uppercase(), label));
 
                 handlers.push(format!(
-                    ":{}\necho Booting {} via NBD (Port {}, Root {}) ...\nkernel {} initrd=initramfs.img ip=dhcp nbdroot=${{next-server}} nbdport={} root={} rw quiet\ninitrd {}\nboot || goto boot_failed\n",
+                    ":{}\necho Booting {} via NBD (Port {}, Root {}) ...\nkernel {} initrd=initramfs.img console=ttyS0 console=tty0 ip=dhcp nbdroot=${{next-server}} nbdport={} nbdmaxpart=16 root={} rw nosplash verbose\ninitrd {}\nboot || goto boot_failed\n",
                     item_key, label, info.nbd_port, info.root_dev, cfg.vtoy_kernel_url, info.nbd_port, info.root_dev, cfg.vtoy_initrd_url
                 ));
             }

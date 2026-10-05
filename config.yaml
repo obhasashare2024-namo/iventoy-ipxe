@@ -2,7 +2,7 @@ BRIDGE_HOST: 0.0.0.0
 BRIDGE_PORT: 26001
 VTOY_DIR: /run/media/namobuddha/2tbnvV
 BOOT_MODE: nbd
-VTOY_KERNEL_URL: http://192.168.1.29:26001/vtoy/vmlinuz
-VTOY_INITRD_URL: http://192.168.1.29:26001/vtoy/initramfs.img
+VTOY_KERNEL_URL: "http://${next-server}:26001/vtoy/vmlinuz"
+VTOY_INITRD_URL: "http://${next-server}:26001/vtoy/initramfs.img"
 KERNEL_PATH: /run/media/namobuddha/2tbnvV/vmlinuz
 INITRD_PATH: /run/media/namobuddha/2tbnvV/initramfs.img

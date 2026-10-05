@@ -116,9 +116,9 @@ async fn api_status(State(state): State<Arc<AppState>>) -> Response<Body> {
         .unwrap()
 }
 
-async fn serve_static(path: &str, is_head: bool) -> Response<Body> {
+async fn serve_static(path: &str, is_head: bool, range: Option<&header::HeaderValue>) -> Response<Body> {
     match tokio::fs::File::open(path).await {
-        Ok(file) => {
+        Ok(mut file) => {
             let meta = match file.metadata().await {
                 Ok(m) => m,
                 Err(e) => {
@@ -130,6 +130,36 @@ async fn serve_static(path: &str, is_head: bool) -> Response<Body> {
                 }
             };
             let len = meta.len();
+
+            // HTTP 206 Partial Content (Range Support)
+            if let Some(range_val) = range.and_then(|r| r.to_str().ok()) {
+                if let Some(spec) = range_val.strip_prefix("bytes=") {
+                    let parts: Vec<&str> = spec.split('-').collect();
+                    if parts.len() == 2 {
+                        let start = parts[0].parse::<u64>().ok();
+                        let end = parts[1].parse::<u64>().ok();
+                        if let Some(start_pos) = start {
+                            let end_pos = end.unwrap_or(len.saturating_sub(1)).min(len.saturating_sub(1));
+                            if start_pos <= end_pos && start_pos < len {
+                                let chunk_len = end_pos - start_pos + 1;
+                                use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+                                if file.seek(SeekFrom::Start(start_pos)).await.is_ok() {
+                                    let stream = ReaderStream::new(file.take(chunk_len));
+                                    return Response::builder()
+                                        .status(StatusCode::PARTIAL_CONTENT)
+                                        .header(header::CONTENT_TYPE, "application/octet-stream")
+                                        .header(header::CONTENT_LENGTH, chunk_len)
+                                        .header(header::CONTENT_RANGE, format!("bytes {}-{}/{}", start_pos, end_pos, len))
+                                        .header(header::ACCEPT_RANGES, "bytes")
+                                        .body(if is_head { Body::empty() } else { Body::from_stream(stream) })
+                                        .unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if is_head {
                 Response::builder()
                     .status(StatusCode::OK)
@@ -260,7 +290,7 @@ async fn vmlinuz_handler(
     let method = req.method().clone();
     req_log(&client, &format!("{} /vtoy/vmlinuz", method));
     let cfg = state.storage.get_config().await;
-    serve_static(&cfg.kernel_path, method == Method::HEAD).await
+    serve_static(&cfg.kernel_path, method == Method::HEAD, req.headers().get(header::RANGE)).await
 }
 
 async fn initramfs_handler(
@@ -271,7 +301,7 @@ async fn initramfs_handler(
     let method = req.method().clone();
     req_log(&client, &format!("{} /vtoy/initramfs.img", method));
     let cfg = state.storage.get_config().await;
-    serve_static(&cfg.initrd_path, method == Method::HEAD).await
+    serve_static(&cfg.initrd_path, method == Method::HEAD, req.headers().get(header::RANGE)).await
 }
 
 async fn iso_handler(
@@ -284,7 +314,7 @@ async fn iso_handler(
     req_log(&client, &format!("{} /iso/{}", method, file));
     let cfg = state.storage.get_config().await;
     let fullpath = format!("{}/{}", cfg.vtoy_dir, file);
-    serve_static(&fullpath, method == Method::HEAD).await
+    serve_static(&fullpath, method == Method::HEAD, req.headers().get(header::RANGE)).await
 }
 
 async fn api_preview(State(state): State<Arc<AppState>>) -> Response<Body> {
